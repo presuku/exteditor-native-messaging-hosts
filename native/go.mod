@@ -1,4 +1,4 @@
-module github.com/presuku/exteditor-mailext
+module github.com/presuku/exteditor-native-messaging-hosts
 
 go 1.25.0
 
