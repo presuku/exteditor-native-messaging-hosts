@@ -3,5 +3,5 @@
     "description": "Edit text with an external editor.",
     "path": "@@NATIVE_PATH@@",
     "type": "stdio",
-    "allowed_extensions": [ "exteditor.mailext@example.com" ]
+    "allowed_extensions": [ "exteditor.webext@example.com", "exteditor.mailext@example.com" ]
 }
