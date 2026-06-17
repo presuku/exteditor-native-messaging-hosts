@@ -42,11 +42,11 @@ type Message struct {
 	Mtype   string `json:"type,omitempty"`
 	Payload struct {
 		Id        string `json:"id,omitempty"`
-		Text      string `json:"text,omitempty"`
+		Text      string `json:"text"`
 		Caret     int    `json:"caret,omitempty"`
-		Subject   string `json:"subject,omitempty"`
-		Editor    string `json:"editor,omitempty"`
-		Extension string `json:"extension,omitempty"`
+		Subject   string `json:"subject"`
+		Editor    string `json:"editor"`
+		Extension string `json:"extension"`
 		Error     string `json:"error,omitempty"`
 	} `json:"payload"`
 }
