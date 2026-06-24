@@ -1,11 +1,13 @@
-.PHONY: all clean native-build
+.PHONY: all clean build pkg
 
-all: native-build
+all: build
 
 clean:
 	$(MAKE) -C native clean
+	rm -rf output
 
-native-build:
+build:
 	$(MAKE) -C native
 
-
+pkg:
+	./scripts/mkpkg.sh

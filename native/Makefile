@@ -25,11 +25,11 @@ dbgbuild:
 pkg: linux macos windows
 
 linux: $(SRCS)
-	GOOS=linux GOARCH=amd64 go build -o output/linux/$(TARGET)
+	GOOS=linux GOARCH=amd64 go build -o output/linux_amd64/$(TARGET)
 
 macos: $(SRCS)
-	GOOS=darwin GOARCH=arm64 go build -o output/macos/$(TARGET)
+	GOOS=darwin GOARCH=arm64 go build -o output/macos_arm64/$(TARGET)
 
 windows: $(SRCS)
-	GOOS=windows GOARCH=amd64 go build -o output/windows/$(TARGET).exe
+	GOOS=windows GOARCH=amd64 go build -o output/windows_amd64/$(TARGET).exe
 

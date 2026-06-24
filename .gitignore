@@ -1,3 +1,4 @@
-/native/exteditor.json
+/native/output/*
 /native/exteditor
 /native/exteditor.exe
+/output/*
