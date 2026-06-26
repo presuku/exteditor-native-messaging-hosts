@@ -19,30 +19,28 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
-type myLogStruct struct{}
+var enableLog = false
 
-var (
-	enable_log = false
-	mylog      = &myLogStruct{}
-	stdoutMu   sync.Mutex // Protects parallel writes to os.Stdout
-)
+type myLogStruct struct {
+	r *runner
+}
 
 func (l *myLogStruct) Printf(format string, v ...any) {
-	if enable_log {
+	if l.r.enableLog {
 		log.Printf(format, v...)
 	}
 }
 
 func (l *myLogStruct) Fatalf(format string, v ...any) {
-	if enable_log {
+	if l.r.enableLog {
 		log.Fatalf(format, v...)
 	}
 }
 
-type Message struct {
+type message struct {
 	Mtype   string `json:"type,omitempty"`
 	Payload struct {
-		Id        string `json:"id,omitempty"`
+		ID        string `json:"id,omitempty"`
 		Text      string `json:"text"`
 		Caret     int    `json:"caret,omitempty"`
 		Subject   string `json:"subject"`
@@ -53,12 +51,34 @@ type Message struct {
 }
 
 type tmpManager struct {
-	tmp_dir   string
-	tmp_files map[string]string
-	mu        *sync.RWMutex
+	tmpDir   string
+	tmpFiles map[string]string
+	mu       *sync.RWMutex
+	r        *runner
 }
 
-func offset_to_line_and_column(msg *Message) (int, int) {
+type runner struct {
+	in          io.Reader
+	out         io.Writer
+	stdoutMu    sync.Mutex
+	enableLog   bool
+	mylog       *myLogStruct
+	execCommand func(ctx context.Context, name string, arg ...string) *exec.Cmd
+	tmpMgr      *tmpManager
+}
+
+func newRunner(in io.Reader, out io.Writer, enableLog bool) *runner {
+	r := &runner{
+		in:          in,
+		out:         out,
+		enableLog:   enableLog,
+		execCommand: exec.CommandContext,
+	}
+	r.mylog = &myLogStruct{r: r}
+	return r
+}
+
+func offsetToLineAndColumn(msg *message) (int, int) {
 	rtext := []rune(msg.Payload.Text)
 	offset := max(0, min(len(rtext), msg.Payload.Caret))
 	subText := rtext[:offset]
@@ -76,9 +96,9 @@ func offset_to_line_and_column(msg *Message) (int, int) {
 	return line, column
 }
 
-func build_arguments(args []string, absfn string, line, column int) []string {
-	expanded_args := make([]string, len(args), len(args)+1)
-	fn_added := false
+func buildArguments(args []string, absfn string, line, column int) []string {
+	expandedArgs := make([]string, len(args), len(args)+1)
+	fnAdded := false
 	replacer := strings.NewReplacer(
 		"%s", absfn,
 		"%l", strconv.Itoa(line+1),
@@ -87,66 +107,68 @@ func build_arguments(args []string, absfn string, line, column int) []string {
 		"%C", strconv.Itoa(column),
 	)
 	for i, arg := range args {
-		if fn_added || strings.Contains(arg, "%s") {
-			fn_added = true
+		if fnAdded || strings.Contains(arg, "%s") {
+			fnAdded = true
 		}
 		output := replacer.Replace(arg)
-		expanded_args[i] = output
+		expandedArgs[i] = output
 	}
-	if !fn_added {
-		expanded_args = append(expanded_args, absfn)
+	if !fnAdded {
+		expandedArgs = append(expandedArgs, absfn)
 	}
-	return expanded_args
+	return expandedArgs
 }
 
-func send_raw_message(raw_msg []byte) {
-	stdoutMu.Lock()
-	defer stdoutMu.Unlock()
+func (r *runner) sendRawMessage(rawMsg []byte) {
+	r.stdoutMu.Lock()
+	defer r.stdoutMu.Unlock()
 
-	l := uint32(len(raw_msg))
+	l := uint32(len(rawMsg))
 	lbuf := make([]byte, 4)
 
 	binary.LittleEndian.PutUint32(lbuf, l)
 
-	os.Stdout.Write(lbuf)
-	os.Stdout.Write(raw_msg)
-	os.Stdout.Sync()
+	r.out.Write(lbuf)
+	r.out.Write(rawMsg)
+	if syncer, ok := r.out.(interface{ Sync() error }); ok {
+		syncer.Sync()
+	}
 
-	mylog.Printf("send raw:%d, msg:[%s]\n", l, raw_msg)
+	r.mylog.Printf("send raw:%d, msg:[%s]\n", l, rawMsg)
 }
 
-func send_message(msg *Message) {
-	raw_msg, err := json.Marshal(msg)
+func (r *runner) sendMessage(msg *message) {
+	rawMsg, err := json.Marshal(msg)
 	if err != nil {
-		mylog.Fatalf("internal error: json marshal\n")
+		r.mylog.Fatalf("internal error: json marshal\n")
 		return
 	}
-	send_raw_message(raw_msg)
+	r.sendRawMessage(rawMsg)
 }
 
-func send_text_update(id string, text string) {
-	msg := &Message{}
+func (r *runner) sendTextUpdate(id string, text string) {
+	msg := &message{}
 	msg.Mtype = "text_update"
-	msg.Payload.Id = id
+	msg.Payload.ID = id
 	msg.Payload.Text = text
-	send_message(msg)
+	r.sendMessage(msg)
 }
 
-func send_death_notice(id string) {
-	msg := &Message{}
+func (r *runner) sendDeathNotice(id string) {
+	msg := &message{}
 	msg.Mtype = "death_notice"
-	msg.Payload.Id = id
-	send_message(msg)
+	msg.Payload.ID = id
+	r.sendMessage(msg)
 }
 
-func send_error(err error) {
-	msg := &Message{}
+func (r *runner) sendError(err error) {
+	msg := &message{}
 	msg.Mtype = "error"
 	msg.Payload.Error = err.Error()
-	send_message(msg)
+	r.sendMessage(msg)
 }
 
-func handle_inotify_event(ctx context.Context, tmp_mgr *tmpManager, targetAbsfn string) error {
+func (r *runner) handleInotifyEvent(ctx context.Context, tm *tmpManager, targetAbsfn string) error {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		return err
@@ -165,22 +187,22 @@ func handle_inotify_event(ctx context.Context, tmp_mgr *tmpManager, targetAbsfn 
 				return errors.New("watcher channel closed")
 			}
 			if event.Op&fsnotify.Write == fsnotify.Write {
-				mylog.Printf("event:%s, file:%s\n", event, event.Name)
-				id, bin, err := tmp_mgr.get(filepath.Base(targetAbsfn))
+				r.mylog.Printf("event:%s, file:%s\n", event, event.Name)
+				id, bin, err := tm.get(filepath.Base(targetAbsfn))
 				if err != nil {
 					return err
 				}
-				mylog.Printf("len msg:%d\n", len(bin))
+				r.mylog.Printf("len msg:%d\n", len(bin))
 				text := string(bin)
 				replacer := strings.NewReplacer(
 					"\r\n", "\n",
 					"\r", "\n",
 				)
-				ln_text := replacer.Replace(text)
-				send_text_update(id, ln_text)
+				lnText := replacer.Replace(text)
+				r.sendTextUpdate(id, lnText)
 			}
 		case err, ok := <-watcher.Errors:
-			mylog.Printf("watcher error:%s\n", err)
+			r.mylog.Printf("watcher error:%s\n", err)
 			if !ok {
 				return errors.New("watcher error channel closed")
 			}
@@ -191,49 +213,47 @@ func handle_inotify_event(ctx context.Context, tmp_mgr *tmpManager, targetAbsfn 
 	}
 }
 
-func handle_message_new_text(ctx context.Context, tmp_mgr *tmpManager, msg *Message) error {
+func (r *runner) handleMessageNewText(ctx context.Context, tm *tmpManager, msg *message) error {
 	innerCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	absfn, err := tmp_mgr.new(msg)
+	absfn, err := tm.create(msg)
 	if err != nil {
-		send_error(err)
+		r.sendError(err)
 		return err
 	}
-	defer tmp_mgr.delete(msg, absfn)
+	defer tm.remove(msg, absfn)
 
-	editor_args := []string{}
-	if err := json.Unmarshal([]byte(msg.Payload.Editor), &editor_args); err != nil {
-		mylog.Fatalf("Unmarshal error:editor_args:%s\n", err)
+	editorArgs := []string{}
+	if err := json.Unmarshal([]byte(msg.Payload.Editor), &editorArgs); err != nil {
+		r.mylog.Fatalf("Unmarshal error:editor_args:%s\n", err)
 		return err
 	}
-	mylog.Printf("editor_args:%s\n", editor_args)
+	r.mylog.Printf("editor_args:%s\n", editorArgs)
 
-	if len(editor_args) == 0 {
+	if len(editorArgs) == 0 {
 		return errors.New("editor arguments are empty")
 	}
 
-	line, column := offset_to_line_and_column(msg)
-	editor_args = build_arguments(editor_args, absfn, line, column)
+	line, column := offsetToLineAndColumn(msg)
+	editorArgs = buildArguments(editorArgs, absfn, line, column)
 
-	mylog.Printf("built editor_args: %s\n", editor_args)
+	r.mylog.Printf("built editor_args: %s\n", editorArgs)
 
 	var watchWg sync.WaitGroup
-	watchWg.Add(1)
-	go func() {
-		defer watchWg.Done()
-		if err := handle_inotify_event(innerCtx, tmp_mgr, absfn); err != nil {
-			mylog.Printf("handle_inotify_event error: %v\n", err)
+	watchWg.Go(func() {
+		if err := r.handleInotifyEvent(innerCtx, tm, absfn); err != nil {
+			r.mylog.Printf("handle_inotify_event error: %v\n", err)
 		}
-	}()
+	})
 
-	cmd := exec.CommandContext(innerCtx, editor_args[0], editor_args[1:]...)
+	cmd := r.execCommand(innerCtx, editorArgs[0], editorArgs[1:]...)
 	err = cmd.Run()
 	if err != nil {
-		mylog.Printf("editor command execution error: %v\n", err)
+		r.mylog.Printf("editor command execution error: %v\n", err)
 	}
 
-	mylog.Printf("exec command done: %v\n", err)
+	r.mylog.Printf("exec command done: %v\n", err)
 
 	cancel()
 	watchWg.Wait()
@@ -241,20 +261,18 @@ func handle_message_new_text(ctx context.Context, tmp_mgr *tmpManager, msg *Mess
 	return err
 }
 
-func handle_message(ctx context.Context, tmp_mgr *tmpManager, msg *Message, wg *sync.WaitGroup) {
+func (r *runner) handleMessage(ctx context.Context, tm *tmpManager, msg *message, wg *sync.WaitGroup) {
 	switch msg.Mtype {
 	case "new_text":
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if err := handle_message_new_text(ctx, tmp_mgr, msg); err != nil {
-				mylog.Printf("handle_message_new_text error: %v\n", err)
+		wg.Go(func() {
+			if err := r.handleMessageNewText(ctx, tm, msg); err != nil {
+				r.mylog.Printf("handle_message_new_text error: %v\n", err)
 			}
-		}()
+		})
 	}
 }
 
-func handle_stdin(ctx context.Context, tmp_mgr *tmpManager, wg *sync.WaitGroup) error {
+func (r *runner) handleStdin(ctx context.Context, tm *tmpManager, wg *sync.WaitGroup) error {
 	rawLenByte := make([]byte, 4)
 	for {
 		select {
@@ -263,47 +281,47 @@ func handle_stdin(ctx context.Context, tmp_mgr *tmpManager, wg *sync.WaitGroup) 
 		default:
 		}
 
-		_, err := io.ReadFull(os.Stdin, rawLenByte)
+		_, err := io.ReadFull(r.in, rawLenByte)
 		if err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-				mylog.Printf("ReadFull len EOF\n")
+				r.mylog.Printf("ReadFull len EOF\n")
 				return nil
 			}
-			mylog.Fatalf("ReadFull len err: %v\n", err)
+			r.mylog.Fatalf("ReadFull len err: %v\n", err)
 			return err
 		}
 
 		msgLen := binary.LittleEndian.Uint32(rawLenByte)
-		mylog.Printf("stdin len:%d\n", msgLen)
+		r.mylog.Printf("stdin len:%d\n", msgLen)
 
 		rawMsg := make([]byte, msgLen)
-		_, err = io.ReadFull(os.Stdin, rawMsg)
+		_, err = io.ReadFull(r.in, rawMsg)
 		if err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-				mylog.Printf("ReadFull msg EOF\n")
+				r.mylog.Printf("ReadFull msg EOF\n")
 				return nil
 			}
-			mylog.Fatalf("ReadFull msg err: %v\n", err)
+			r.mylog.Fatalf("ReadFull msg err: %v\n", err)
 			return err
 		}
-		mylog.Printf("stdin len:%d, msg:%s\n", msgLen, rawMsg)
+		r.mylog.Printf("stdin len:%d, msg:%s\n", msgLen, rawMsg)
 
-		msg := Message{}
+		msg := message{}
 		if err := json.Unmarshal(rawMsg, &msg); err != nil {
-			mylog.Fatalf("Unmarshal err: %v\n", err)
+			r.mylog.Fatalf("Unmarshal err: %v\n", err)
 			return err
 		}
-		handle_message(ctx, tmp_mgr, &msg, wg)
+		r.handleMessage(ctx, tm, &msg, wg)
 	}
 }
 
-func (tm *tmpManager) new(msg *Message) (string, error) {
+func (tm *tmpManager) create(msg *message) (string, error) {
 	filename := func(s, m, e string) string {
 		bstr := make([]byte, 0, len(s)+len(m)+len(e))
-		r_underscore := rune('_')
+		rUnderscore := rune('_')
 		for _, r := range s {
 			if !unicode.IsLetter(r) && !unicode.IsDigit(r) {
-				r = r_underscore
+				r = rUnderscore
 			}
 			bstr = append(bstr, string(r)...)
 		}
@@ -312,34 +330,34 @@ func (tm *tmpManager) new(msg *Message) (string, error) {
 		return string(bstr)
 	}(msg.Payload.Subject, "-*.", msg.Payload.Extension)
 
-	f, err := os.CreateTemp(tm.tmp_dir, filename)
+	f, err := os.CreateTemp(tm.tmpDir, filename)
 	if err != nil {
-		mylog.Fatalf("CreateTemp err\n")
+		tm.r.mylog.Fatalf("CreateTemp err\n")
 		return "", err
 	}
 	absfn := f.Name()
 
-	mylog.Printf("msg, [%s]\n", []byte(msg.Payload.Text))
+	tm.r.mylog.Printf("msg, [%s]\n", []byte(msg.Payload.Text))
 	if _, err := f.Write([]byte(msg.Payload.Text)); err != nil {
-		mylog.Fatalf("Write Payload err\n")
+		tm.r.mylog.Fatalf("Write Payload err\n")
 		f.Close()
 		return "", err
 	}
 	f.Close()
 
 	relfn := filepath.Base(absfn)
-	tm.setIdToTmpFiles(relfn, msg.Payload.Id)
+	tm.setIDToTmpFiles(relfn, msg.Payload.ID)
 
 	return absfn, nil
 }
 
 func (tm *tmpManager) get(relfn string) (string, []byte, error) {
-	id, ok := tm.getIdFromTmpFiles(relfn)
+	id, ok := tm.getIDFromTmpFiles(relfn)
 	if !ok {
-		return "", nil, errors.New("relfn does not exist in tmp_files")
+		return "", nil, errors.New("relfn does not exist in tmpFiles")
 	}
 
-	text, err := os.ReadFile(filepath.Join(tm.tmp_dir, relfn))
+	text, err := os.ReadFile(filepath.Join(tm.tmpDir, relfn))
 	if err != nil {
 		return "", nil, err
 	}
@@ -347,40 +365,40 @@ func (tm *tmpManager) get(relfn string) (string, []byte, error) {
 	return id, text, nil
 }
 
-func (tm *tmpManager) setIdToTmpFiles(relfn string, id string) {
+func (tm *tmpManager) setIDToTmpFiles(relfn string, id string) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
-	tm.tmp_files[relfn] = id
+	tm.tmpFiles[relfn] = id
 }
 
-func (tm *tmpManager) getIdFromTmpFiles(relfn string) (string, bool) {
+func (tm *tmpManager) getIDFromTmpFiles(relfn string) (string, bool) {
 	tm.mu.RLock()
 	defer tm.mu.RUnlock()
-	v, ok := tm.tmp_files[relfn]
+	v, ok := tm.tmpFiles[relfn]
 	return v, ok
 }
 
-func (tm *tmpManager) existsIdInTmpFiles(relfn string) bool {
+func (tm *tmpManager) existsIDInTmpFiles(relfn string) bool {
 	tm.mu.RLock()
 	defer tm.mu.RUnlock()
-	v, ok := tm.tmp_files[relfn]
+	v, ok := tm.tmpFiles[relfn]
 	return (v != "") && ok
 }
 
-func (tm *tmpManager) deleteIdInTmpFiles(relfn string) {
+func (tm *tmpManager) deleteIDInTmpFiles(relfn string) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
-	delete(tm.tmp_files, relfn)
+	delete(tm.tmpFiles, relfn)
 }
 
-func (tm *tmpManager) delete(msg *Message, absfn string) {
+func (tm *tmpManager) remove(msg *message, absfn string) {
 	relfn := filepath.Base(absfn)
-	tm.deleteIdInTmpFiles(relfn)
+	tm.deleteIDInTmpFiles(relfn)
 	os.Remove(absfn)
-	send_death_notice(msg.Payload.Id)
+	tm.r.sendDeathNotice(msg.Payload.ID)
 }
 
-func NewTmpManager() (*tmpManager, error) {
+func (r *runner) newTmpManager() (*tmpManager, error) {
 	td := ""
 	if runtime.GOOS == "windows" {
 		t := os.TempDir()
@@ -408,42 +426,45 @@ func NewTmpManager() (*tmpManager, error) {
 		return nil, err
 	}
 
-	ret := &tmpManager{tmp_dir: dir, tmp_files: map[string]string{}}
+	ret := &tmpManager{tmpDir: dir, tmpFiles: map[string]string{}, r: r}
 	ret.mu = &sync.RWMutex{}
 	return ret, nil
 }
 
-func run() int {
-	mylog.Printf("start run\n")
+func (r *runner) run() int {
+	r.mylog.Printf("start run\n")
 
-	tmp_mgr, err := NewTmpManager()
+	tm, err := r.newTmpManager()
 	if err != nil {
-		mylog.Fatalf("something error occurs when create temporary directory:%s", err.Error())
+		r.mylog.Fatalf("something error occurs when create temporary directory:%s", err.Error())
 		return 1
 	}
-	defer os.RemoveAll(tmp_mgr.tmp_dir)
+	defer os.RemoveAll(tm.tmpDir)
+	r.tmpMgr = tm
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	var wg sync.WaitGroup
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		if err := handle_stdin(ctx, tmp_mgr, &wg); err != nil {
-			mylog.Printf("handle_stdin error: %v\n", err)
+	wg.Go(func() {
+		if err := r.handleStdin(ctx, tm, &wg); err != nil {
+			r.mylog.Printf("handle_stdin error: %v\n", err)
 		}
 		cancel()
-	}()
+	})
 
 	wg.Wait()
 
 	return 0
 }
 
+func (r *runner) setExecCommand(f func(ctx context.Context, name string, arg ...string) *exec.Cmd) {
+	r.execCommand = f
+}
+
 func main() {
-	if enable_log {
+	if enableLog {
 		log.SetPrefix("[Log] ")
 		f, err := os.Create("log.txt")
 		if err != nil {
@@ -453,7 +474,8 @@ func main() {
 		log.SetOutput(f)
 	}
 
-	exit_code := run()
+	r := newRunner(os.Stdin, os.Stdout, enableLog)
+	exitCode := r.run()
 
-	os.Exit(exit_code)
+	os.Exit(exitCode)
 }

@@ -1,5 +1,5 @@
 TARGET := exteditor
-SRCS := main.go
+SRCS := $(filter-out %_test.go, $(wildcard *.go))
 
 .PHONY: all clean
 .PHONY: build rebuild logbuild dbgbuild

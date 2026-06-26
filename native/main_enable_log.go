@@ -3,5 +3,5 @@
 package main
 
 func init() {
-	enable_log = true
+	enableLog = true
 }
