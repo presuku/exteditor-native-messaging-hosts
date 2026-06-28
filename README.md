@@ -4,9 +4,39 @@
 
 External Editor Native Messaging Hosts for [exteditor-webext](https://github.com/presuku/exteditor-webext) and [exteditor-mailext](https://github.com/presuku/exteditor-mailext).
 
-## Installation
+## Installation / Uninstallation
 
-TBD
+Download the appropriate ZIP file for your environment from the [Release](https://github.com/presuku/exteditor-native-messaging-hosts/releases) page and extract (unzip) it.
+
+### For Windows
+
+#### Installation
+
+Run `install.bat`.
+
+This script will automatically perform the following actions:
+
+* Copy `exteditor.json` and `exteditor.exe` to `%LOCALAPPDATA%\exteditor-nmh`.
+* Add the JSON file path to the registry at `HKCU\Software\Mozilla\NativeMessagingHosts\exteditor`.
+
+#### Uninstallation
+
+Run `uninstall.bat` to revert the changes made by the installation script.
+
+### For Linux
+
+#### Installation
+
+Run `install.sh`.
+
+This script will automatically perform the following actions:
+
+* Copy `exteditor.json` to `~/.mozilla/native-messaging-hosts`.
+* Copy `exteditor` to `~/.local/bin/exteditor-nmh`.
+
+#### Uninstallation
+
+Run `uninstall.sh` to revert the changes made by the installation script.
 
 ## Usage
 
