@@ -1,3 +1,5 @@
+[![CI](https://github.com/presuku/exteditor-native-messaging-hosts/actions/workflows/ci.yml/badge.svg)](https://github.com/presuku/exteditor-native-messaging-hosts/actions/workflows/ci.yml)
+
 # External Editor Native Messaging Hosts
 
 External Editor Native Messaging Hosts for [exteditor-webext](https://github.com/presuku/exteditor-webext) and [exteditor-mailext](https://github.com/presuku/exteditor-mailext).
