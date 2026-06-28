@@ -414,3 +414,148 @@ func TestRunnerIntegration(t *testing.T) {
 		t.Errorf("last message id = %q, want %q", lastMsg.Payload.ID, "msg-1")
 	}
 }
+
+// Helper process that simulates rename-based save (e.g. mousepad, gedit, kate).
+// Writes to a temporary file then renames it over the target, generating a Create event.
+func TestHelperProcessRename(t *testing.T) {
+	if os.Getenv("GO_WANT_HELPER_PROCESS") != "1" {
+		return
+	}
+	defer os.Exit(0)
+
+	args := os.Args
+	if len(args) < 3 {
+		return
+	}
+	filePath := args[len(args)-1]
+
+	content := []byte("updated content from rename editor\n")
+	for range 100 {
+		tmpFile := filePath + ".tmp"
+		if err := os.WriteFile(tmpFile, content, 0644); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to write temp file: %v\n", err)
+			os.Exit(1)
+		}
+		if err := os.Rename(tmpFile, filePath); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to rename file: %v\n", err)
+			os.Exit(1)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestRunnerIntegrationRenameWrite(t *testing.T) {
+	pr, pw := io.Pipe()
+	trackOut := &trackingWriter{
+		textUpdated:  make(chan struct{}),
+		deathNoticed: make(chan struct{}),
+	}
+
+	r := newRunner(pr, trackOut, true)
+
+	r.setExecCommand(func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		cs := []string{"-test.run=TestHelperProcessRename", "--", name}
+		cs = append(cs, args...)
+		cmd := exec.CommandContext(ctx, os.Args[0], cs...)
+		cmd.Env = []string{"GO_WANT_HELPER_PROCESS=1"}
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		return cmd
+	})
+
+	msg := message{}
+	msg.Mtype = "new_text"
+	msg.Payload.ID = "msg-rename"
+	msg.Payload.Text = "initial text"
+	msg.Payload.Subject = "subject"
+	msg.Payload.Editor = `["mock-editor"]`
+	msg.Payload.Extension = "txt"
+
+	rawMsg, err := json.Marshal(msg)
+	if err != nil {
+		t.Fatalf("failed to marshal message: %v", err)
+	}
+
+	msgLen := uint32(len(rawMsg))
+	lenBuf := make([]byte, 4)
+	binary.LittleEndian.PutUint32(lenBuf, msgLen)
+
+	exitCodeChan := make(chan int, 1)
+	go func() {
+		exitCode := r.run()
+		exitCodeChan <- exitCode
+	}()
+
+	pw.Write(lenBuf)
+	pw.Write(rawMsg)
+
+	select {
+	case <-trackOut.textUpdated:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout waiting for text_update from rename-based editor")
+	}
+
+	pw.Close()
+
+	select {
+	case <-trackOut.deathNoticed:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timeout waiting for death_notice")
+	}
+
+	select {
+	case code := <-exitCodeChan:
+		if code != 0 {
+			t.Errorf("runner exited with non-zero code: %d", code)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for runner to finish")
+	}
+
+	outBytes := trackOut.Bytes()
+
+	readMessages := []message{}
+	offset := 0
+	for offset < len(outBytes) {
+		if offset+4 > len(outBytes) {
+			t.Fatalf("incomplete length prefix at offset %d", offset)
+		}
+		l := binary.LittleEndian.Uint32(outBytes[offset : offset+4])
+		offset += 4
+		if offset+int(l) > len(outBytes) {
+			t.Fatalf("incomplete message payload at offset %d, expected %d bytes", offset, l)
+		}
+		var m message
+		if err := json.Unmarshal(outBytes[offset:offset+int(l)], &m); err != nil {
+			t.Fatalf("failed to unmarshal output message: %v", err)
+		}
+		readMessages = append(readMessages, m)
+		offset += int(l)
+	}
+
+	if len(readMessages) < 2 {
+		t.Fatalf("expected at least 2 output messages, got %d: %+v", len(readMessages), readMessages)
+	}
+
+	for i := 0; i < len(readMessages)-1; i++ {
+		m := readMessages[i]
+		if m.Mtype != "text_update" {
+			t.Errorf("message %d type = %q, want %q", i, m.Mtype, "text_update")
+		}
+		if m.Payload.Text != "updated content from rename editor\n" {
+			t.Errorf("message %d text = %q, want %q", i, m.Payload.Text, "updated content from rename editor\n")
+		}
+		if m.Payload.ID != "msg-rename" {
+			t.Errorf("message %d id = %q, want %q", i, m.Payload.ID, "msg-rename")
+		}
+	}
+
+	lastMsg := readMessages[len(readMessages)-1]
+	if lastMsg.Mtype != "death_notice" {
+		t.Errorf("last message type = %q, want %q", lastMsg.Mtype, "death_notice")
+	}
+	if lastMsg.Payload.ID != "msg-rename" {
+		t.Errorf("last message id = %q, want %q", lastMsg.Payload.ID, "msg-rename")
+	}
+}
+

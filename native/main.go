@@ -175,7 +175,7 @@ func (r *runner) handleInotifyEvent(ctx context.Context, tm *tmpManager, targetA
 	}
 	defer watcher.Close()
 
-	err = watcher.Add(targetAbsfn)
+	err = watcher.Add(filepath.Dir(targetAbsfn))
 	if err != nil {
 		return err
 	}
@@ -186,7 +186,10 @@ func (r *runner) handleInotifyEvent(ctx context.Context, tm *tmpManager, targetA
 			if !ok {
 				return errors.New("watcher channel closed")
 			}
-			if event.Op&fsnotify.Write == fsnotify.Write {
+			if event.Name != targetAbsfn {
+				continue
+			}
+			if event.Has(fsnotify.Write) || event.Has(fsnotify.Create) {
 				r.mylog.Printf("event:%s, file:%s\n", event, event.Name)
 				id, bin, err := tm.get(filepath.Base(targetAbsfn))
 				if err != nil {
