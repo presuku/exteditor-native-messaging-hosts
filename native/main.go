@@ -319,6 +319,11 @@ func (r *runner) handleStdin(ctx context.Context, tm *tmpManager, wg *sync.WaitG
 }
 
 func (tm *tmpManager) create(msg *message) (string, error) {
+	if err := os.MkdirAll(tm.tmpDir, 0700); err != nil {
+		tm.r.mylog.Fatalf("MkdirAll err: %v\n", err)
+		return "", err
+	}
+
 	filename := func(s, m, e string) string {
 		bstr := make([]byte, 0, len(s)+len(m)+len(e))
 		rUnderscore := rune('_')
@@ -398,6 +403,15 @@ func (tm *tmpManager) remove(msg *message, absfn string) {
 	relfn := filepath.Base(absfn)
 	tm.deleteIDInTmpFiles(relfn)
 	os.Remove(absfn)
+
+	tm.mu.RLock()
+	activeCount := len(tm.tmpFiles)
+	tm.mu.RUnlock()
+
+	if activeCount == 0 {
+		os.RemoveAll(tm.tmpDir)
+	}
+
 	tm.r.sendDeathNotice(msg.Payload.ID)
 }
 

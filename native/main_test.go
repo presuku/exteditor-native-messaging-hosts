@@ -243,6 +243,26 @@ func TestTmpManager(t *testing.T) {
 		t.Errorf("relfn %s should have been deleted from tmpFiles", relfn)
 	}
 
+	// Verify that the temporary directory is also deleted when empty
+	if _, err := os.Stat(tm.tmpDir); !os.IsNotExist(err) {
+		t.Errorf("temporary directory should have been deleted: %s", tm.tmpDir)
+	}
+
+	// Verify that create can run successfully again by re-creating the directory
+	absfn2, err := tm.create(msg)
+	if err != nil {
+		t.Fatalf("failed to create tmp file after directory deletion: %v", err)
+	}
+
+	if _, err := os.Stat(absfn2); os.IsNotExist(err) {
+		t.Errorf("temporary file was not created: %s", absfn2)
+	}
+
+	tm.remove(msg, absfn2)
+	if _, err := os.Stat(tm.tmpDir); !os.IsNotExist(err) {
+		t.Errorf("temporary directory should have been deleted again: %s", tm.tmpDir)
+	}
+
 	outBytes := out.Bytes()
 	if len(outBytes) < 4 {
 		t.Fatalf("expected at least 4 bytes for length, got %d", len(outBytes))
